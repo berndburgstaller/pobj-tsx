@@ -1,0 +1,547 @@
+diff -crNbB gcc-6.3.0/gcc/ada/gcc-interface/Makefile.in gcc-6.3.0_modified/gcc/ada/gcc-interface/Makefile.in
+*** gcc-6.3.0/gcc/ada/gcc-interface/Makefile.in	2017-06-13 21:39:58.769737928 +0900
+--- gcc-6.3.0_modified/gcc/ada/gcc-interface/Makefile.in	2017-06-13 21:42:10.576096804 +0900
+***************
+*** 2465,2471 ****
+   machcode.ads text_io.ads unchconv.ads unchdeal.ads \
+   sequenio.ads system.ads memtrack.adb \
+   a-[a-o]*.adb a-[p-z]*.adb a-[a-o]*.ads a-[p-z]*.ads g-*.ad? i-*.ad? \
+!  s-[a-o]*.adb s-[p-z]*.adb s-[a-o]*.ads s-[p-z]*.ads
+  
+  # Files that are in ADA_INCLUDE_SRCS but not in all configurations.
+  # They will be removed from the run time if not used.
+--- 2465,2472 ----
+   machcode.ads text_io.ads unchconv.ads unchdeal.ads \
+   sequenio.ads system.ads memtrack.adb \
+   a-[a-o]*.adb a-[p-z]*.adb a-[a-o]*.ads a-[p-z]*.ads g-*.ad? i-*.ad? \
+!  s-[a-o]*.adb s-[p-z]*.adb s-[a-o]*.ads s-[p-z]*.ads \
+!  tsx_inst.ads tsx_inst.adb
+  
+  # Files that are in ADA_INCLUDE_SRCS but not in all configurations.
+  # They will be removed from the run time if not used.
+diff -crNbB gcc-6.3.0/gcc/ada/Makefile.rtl gcc-6.3.0_modified/gcc/ada/Makefile.rtl
+*** gcc-6.3.0/gcc/ada/Makefile.rtl	2017-06-13 21:39:58.773737909 +0900
+--- gcc-6.3.0_modified/gcc/ada/Makefile.rtl	2017-06-13 21:41:24.471321064 +0900
+***************
+*** 76,82 ****
+    s-tposen$(objext) \
+    s-tratas$(objext) \
+    thread$(objext) \
+!   $(EXTRA_GNATRTL_TASKING_OBJS)
+  
+  # Objects the require IEEE Float
+  GNATRTL_ALTIVEC_OBJS= \
+--- 76,83 ----
+    s-tposen$(objext) \
+    s-tratas$(objext) \
+    thread$(objext) \
+!   $(EXTRA_GNATRTL_TASKING_OBJS) \
+!   tsx_inst$(objext)
+  
+  # Objects the require IEEE Float
+  GNATRTL_ALTIVEC_OBJS= \
+diff -crNbB gcc-6.3.0/gcc/ada/s-taprop-linux.adb gcc-6.3.0_modified/gcc/ada/s-taprop-linux.adb
+*** gcc-6.3.0/gcc/ada/s-taprop-linux.adb	2017-06-13 21:39:58.819737685 +0900
+--- gcc-6.3.0_modified/gcc/ada/s-taprop-linux.adb	2017-06-14 23:07:12.402363883 +0900
+***************
+*** 54,59 ****
+--- 54,67 ----
+  --  For example when using the restricted run time, it is replaced by
+  --  System.Tasking.Restricted.Stages.
+  
++ with TSX_Inst; use TSX_Inst;
++ with Ada.Assertions; use Ada.Assertions;
++ --  We propose incorporation of Intel's hardware transaction memory support
++ --  for internal locks used in GNARL. Please refer to our publication via
++ --  Ada-Europ 2017: `Lock Elision for Protected Objects Using Intel
++ --  Transactional Synchronization Extensions`
++ --  (https://doi.org/10.1007/978-3-319-60588-3_8 )
++ 
+  package body System.Task_Primitives.Operations is
+  
+     package OSC renames System.OS_Constants;
+***************
+*** 113,118 ****
+--- 121,129 ----
+     --  Constant to indicate that the thread identifier has not yet been
+     --  initialized.
+  
++    Use_TSX : constant Boolean := True;
++    --  Whether to use TSX to elide locks
++ 
+     --------------------
+     -- Local Packages --
+     --------------------
+***************
+*** 266,271 ****
+--- 277,284 ----
+        pragma Unreferenced (Prio);
+  
+     begin
++       Lock_Release (L.TSX_Lock'Address);
++ 
+        if Locking_Policy = 'R' then
+           declare
+              RWlock_Attr : aliased pthread_rwlockattr_t;
+***************
+*** 355,362 ****
+       (L                 : not null access Lock;
+        Ceiling_Violation : out Boolean)
+     is
+!       Result : Interfaces.C.int;
+!    begin
+        if Locking_Policy = 'R' then
+           Result := pthread_rwlock_wrlock (L.RW'Access);
+        else
+--- 368,437 ----
+       (L                 : not null access Lock;
+        Ceiling_Violation : out Boolean)
+     is
+!       State       : uint32;
+!       Backoff     : Integer;
+!       Max_Backoff : Integer;
+!       Result      : Interfaces.C.int;
+!    begin
+!       Max_Backoff := 1;
+!       if Use_TSX then
+!          Assert (True);
+!          for i in 0 .. Retry_Max_Count loop
+!             State := XBegin;
+!             if State = XBegin_Started then
+! 
+!                --  If the shadow lock is free, start a transaction
+! 
+!                if L.TSX_Lock = 0 then
+!                   Ceiling_Violation := False;
+!                   return;
+!                end if;
+!                XAbort;
+!             else
+! 
+!                --  Fall-back path is defined here. First, Wait until the shadow
+!                --  lock is set free before starting of fall-back path.
+! 
+!                exit when (XAbort_Capacity and State) /= 0
+!                           or (XAbort_Retry and State) = 0;
+!                exit when ((XAbort_Explicit and State) /= 0)
+!                           and (Retrieve_XAbort_Code (State) = 0);
+! 
+!                if (State and XAbort_Conflict) /= 0 then
+!                   Backoff := 10 * Max_Backoff;
+!                   Wait_Backoff :
+!                   while Backoff > 0 loop
+!                      Pause;
+!                      Backoff := Backoff - 1;
+!                   end loop Wait_Backoff;
+!                   if Max_Backoff < 2**10 then
+!                      Max_Backoff := Max_Backoff * 2;
+!                   end if;
+!                end if;
+! 
+!                --  Note: control reaches here in case of XAbort_Explicit
+! 
+!                Until_Free :
+!                while L.TSX_Lock /= 0 loop
+!                   Pause;
+!                end loop Until_Free;
+!             end if;
+!          end loop;
+! 
+!          --  Fall-back path starts here. Begin with acquiring the shadow lock
+!          --  TSX_Lock.
+! 
+!          Until_Acquire :
+!          while Lock_Test_And_Set (L.TSX_Lock'Address, 1) /= 0 loop
+!             Wait :
+!             while L.TSX_Lock /= 0 loop
+!                Pause;
+!             end loop Wait;
+!          end loop Until_Acquire;
+!       end if;
+! 
+!       --  Control ends up using lock
+! 
+        if Locking_Policy = 'R' then
+           Result := pthread_rwlock_wrlock (L.RW'Access);
+        else
+***************
+*** 399,406 ****
+--- 474,538 ----
+       (L                 : not null access Lock;
+        Ceiling_Violation : out Boolean)
+     is
++       State : uint32;
++       Backoff : Integer := 1;
+        Result : Interfaces.C.int;
+     begin
++       if Use_TSX then
++          Assert (True);
++          for i in 0 .. Retry_Max_Count loop
++             State := XBegin;
++             if State = XBegin_Started then
++ 
++                --  If the shadow lock is free, start a transaction
++ 
++                if L.TSX_Lock = 0 then
++                   Ceiling_Violation := False;
++                   return;
++                end if;
++                XAbort;
++             else
++ 
++                --  Fall-back path is defined here. First, Wait until the shadow
++                --  lock is set free before starting of fall-back path.
++ 
++                if (XAbort_Retry and State) = 0
++                   and (XAbort_Capacity and State) = 0
++                then
++                   exit;
++                end if;
++ 
++                if (State and XAbort_Conflict) /= 0 then
++                   Wait_Backoff :
++                   while Backoff > 0 loop
++                      Backoff := Backoff - 1;
++                   end loop Wait_Backoff;
++                   Backoff := Backoff * 2;
++                end if;
++ 
++                --  Note: control reaches here in case of XAbort_Explicit
++ 
++                Until_Free :
++                while L.TSX_Lock /= 0 loop
++                   Pause;
++                end loop Until_Free;
++             end if;
++          end loop;
++ 
++          --  Fall-back path starts here. Begin with acquiring the shadow lock
++          --  TSX_Lock.
++ 
++          Until_Acquire :
++          while Lock_Test_And_Set (L.TSX_Lock'Address, 1) /= 0 loop
++             Wait :
++             while L.TSX_Lock /= 0 loop
++                Pause;
++             end loop Wait;
++          end loop Until_Acquire;
++       end if;
++ 
++       --  Control ends up using lock
++ 
+        if Locking_Policy = 'R' then
+           Result := pthread_rwlock_rdlock (L.RW'Access);
+        else
+***************
+*** 418,432 ****
+--- 550,577 ----
+     -- Unlock --
+     ------------
+  
++    --  Intel TSX Support is incorporated into Unlock procedure.
++ 
+     procedure Unlock (L : not null access Lock) is
+        Result : Interfaces.C.int;
+     begin
++       if Use_TSX then
++          if L.TSX_Lock = 0 and then XTest = 1 then
++             XEnd;
++             return;
++          end if;
++       end if;
++ 
+        if Locking_Policy = 'R' then
+           Result := pthread_rwlock_unlock (L.RW'Access);
+        else
+           Result := pthread_mutex_unlock (L.WO'Access);
+        end if;
+        pragma Assert (Result = 0);
++ 
++       if Use_TSX then
++          Lock_Release (L.TSX_Lock'Address);
++       end if;
+     end Unlock;
+  
+     procedure Unlock
+***************
+*** 1091,1097 ****
+        Result : Interfaces.C.int;
+  
+     begin
+!       --  Initialize internal state (always to False (RM D.10(6)))
+  
+        S.State := False;
+        S.Waiting := False;
+--- 1236,1242 ----
+        Result : Interfaces.C.int;
+  
+     begin
+!       --  Initialize internal State (always to False (RM D.10(6)))
+  
+        S.State := False;
+        S.Waiting := False;
+***************
+*** 1188,1196 ****
+        pragma Assert (Result = 0);
+  
+        --  If there is already a task waiting on this suspension object then
+!       --  we resume it, leaving the state of the suspension object to False,
+        --  as it is specified in ARM D.10 par. 9. Otherwise, it just leaves
+!       --  the state to True.
+  
+        if S.Waiting then
+           S.Waiting := False;
+--- 1333,1341 ----
+        pragma Assert (Result = 0);
+  
+        --  If there is already a task waiting on this suspension object then
+!       --  we resume it, leaving the State of the suspension object to False,
+        --  as it is specified in ARM D.10 par. 9. Otherwise, it just leaves
+!       --  the State to True.
+  
+        if S.Waiting then
+           S.Waiting := False;
+***************
+*** 1236,1243 ****
+           raise Program_Error;
+  
+        else
+!          --  Suspend the task if the state is False. Otherwise, the task
+!          --  continues its execution, and the state of the suspension object
+           --  is set to False (ARM D.10 par. 9).
+  
+           if S.State then
+--- 1381,1388 ----
+           raise Program_Error;
+  
+        else
+!          --  Suspend the task if the State is False. Otherwise, the task
+!          --  continues its execution, and the State of the suspension object
+           --  is set to False (ARM D.10 par. 9).
+  
+           if S.State then
+***************
+*** 1371,1385 ****
+        function State
+          (Int : System.Interrupt_Management.Interrupt_ID) return Character;
+        pragma Import (C, State, "__gnat_get_interrupt_state");
+!       --  Get interrupt state.  Defined in a-init.c
+        --  The input argument is the interrupt number,
+        --  and the result is one of the following:
+  
+        Default : constant Character := 's';
+        --    'n'   this interrupt not set by any Interrupt_State pragma
+!       --    'u'   Interrupt_State pragma set state to User
+!       --    'r'   Interrupt_State pragma set state to Runtime
+!       --    's'   Interrupt_State pragma set state to System (use "default"
+        --           system handler)
+  
+        use type System.Multiprocessors.CPU_Range;
+--- 1516,1530 ----
+        function State
+          (Int : System.Interrupt_Management.Interrupt_ID) return Character;
+        pragma Import (C, State, "__gnat_get_interrupt_state");
+!       --  Get interrupt State.  Defined in a-init.c
+        --  The input argument is the interrupt number,
+        --  and the result is one of the following:
+  
+        Default : constant Character := 's';
+        --    'n'   this interrupt not set by any Interrupt_State pragma
+!       --    'u'   Interrupt_State pragma set State to User
+!       --    'r'   Interrupt_State pragma set State to Runtime
+!       --    's'   Interrupt_State pragma set State to System (use "default"
+        --           system handler)
+  
+        use type System.Multiprocessors.CPU_Range;
+diff -crNbB gcc-6.3.0/gcc/ada/s-taspri-posix.ads gcc-6.3.0_modified/gcc/ada/s-taspri-posix.ads
+*** gcc-6.3.0/gcc/ada/s-taspri-posix.ads	2017-06-13 21:39:58.784737856 +0900
+--- gcc-6.3.0_modified/gcc/ada/s-taspri-posix.ads	2017-06-14 23:13:59.479052124 +0900
+***************
+*** 75,80 ****
+--- 75,82 ----
+     type Lock is record
+        RW       : aliased System.OS_Interface.pthread_rwlock_t;
+        WO       : aliased System.OS_Interface.pthread_mutex_t;
++       TSX_Lock : aliased Integer := 0;
++       pragma Atomic (TSX_Lock);
+     end record;
+  
+     type RTS_Lock is new System.OS_Interface.pthread_mutex_t;
+diff -crNbB gcc-6.3.0/gcc/ada/tsx_inst.adb gcc-6.3.0_modified/gcc/ada/tsx_inst.adb
+*** gcc-6.3.0/gcc/ada/tsx_inst.adb	1970-01-01 09:00:00.000000000 +0900
+--- gcc-6.3.0_modified/gcc/ada/tsx_inst.adb	2017-06-14 23:15:44.792454058 +0900
+***************
+*** 0 ****
+--- 1,91 ----
++ with System.Machine_Code; use System.Machine_Code;
++ with Interfaces;          use Interfaces;
++ 
++ package body TSX_Inst is
++ 
++    ------------
++    -- XBegin --
++    ------------
++ 
++    function XBegin return uint32 is
++       ret : uint32 := XBegin_Started;
++    begin
++       Asm (".byte 0xc7,0xf8 ; .long 0",
++       Outputs => uint32'Asm_Output ("+a", ret),
++       Clobber => "memory", Volatile => True);
++       return ret;
++    end XBegin;
++ 
++    ----------
++    -- XEnd --
++    ----------
++ 
++    procedure XEnd is
++    begin
++       Asm (".byte 0x0f,0x01,0xd5", Clobber => "memory", Volatile => True);
++    end XEnd;
++ 
++    -----------
++    -- XTest --
++    -----------
++ 
++    function XTest return uint32 is
++       output : Interfaces.Unsigned_8;
++    begin
++       Asm (".byte 0x0f,0x01,0xd6 ; setnz %0",
++       Outputs => Interfaces.Unsigned_8'Asm_Output ("=r", output),
++       Clobber => "memory", Volatile => True);
++       return uint32 (output);
++    end XTest;
++ 
++    ------------
++    -- XAbort --
++    ------------
++ 
++    procedure XAbort is
++    begin
++       Asm (".byte 0xc6,0xf8,%P0",
++       Inputs => uint32'Asm_Input ("i", 16#ff#),
++       Clobber => "memory", Volatile => True);
++    end XAbort;
++ 
++    -----------------
++    -- XAbort_Comp --
++    -----------------
++ 
++    procedure XAbort_Comp is
++    begin
++       Asm (".byte 0xc6,0xf8,%P0",
++       Inputs => uint32'Asm_Input ("i", 16#00#),
++       Clobber => "memory", Volatile => True);
++    end XAbort_Comp;
++ 
++    --------------------------
++    -- Retrieve_XAbort_Code --
++    --------------------------
++ 
++    function Retrieve_XAbort_Code (State : uint32)
++       return uint32 is
++    begin
++       return State / (2**24);
++    end Retrieve_XAbort_Code;
++ 
++    -----------
++    -- Pause --
++    -----------
++ 
++    procedure Pause is
++    begin
++       Asm ("pause", Volatile => True);
++    end Pause;
++ 
++    -----------
++    -- Fence --
++    -----------
++ 
++    procedure Fence is
++    begin
++       Asm ("", Volatile => True);
++    end Fence;
++ 
++ end TSX_Inst;
+diff -crNbB gcc-6.3.0/gcc/ada/tsx_inst.ads gcc-6.3.0_modified/gcc/ada/tsx_inst.ads
+*** gcc-6.3.0/gcc/ada/tsx_inst.ads	1970-01-01 09:00:00.000000000 +0900
+--- gcc-6.3.0_modified/gcc/ada/tsx_inst.ads	2017-06-14 23:15:44.793454052 +0900
+***************
+*** 0 ****
+--- 1,75 ----
++ with System;
++ 
++ package TSX_Inst is
++    pragma Preelaborate;
++ 
++    type uint32 is mod 2**32
++      with Size => 32;
++ 
++    Retry_Max_Count : constant Integer := 200;
++ 
++    XBegin_Started  : constant uint32 := 16#ffffffff#;
++    XAbort_Explicit : constant uint32 := 2**0;
++    XAbort_Retry    : constant uint32 := 2**1;
++    XAbort_Conflict : constant uint32 := 2**2;
++    XAbort_Capacity : constant uint32 := 2**3;
++    XAbort_Debug    : constant uint32 := 2**4;
++    XAbort_Nested   : constant uint32 := 2**5;
++ 
++    ------------------------------
++    -- Intel (R) RTM Intrinsics --
++    ------------------------------
++ 
++    function XBegin return uint32;
++ 
++    procedure XEnd;
++ 
++    function XTest return uint32;
++ 
++    procedure XAbort;
++ 
++    procedure Pause;
++ 
++    procedure Fence;
++ 
++    procedure XAbort_Comp;
++ 
++    function Retrieve_XAbort_Code (State : uint32) return uint32;
++ 
++    ------------------------------------
++    -- GCC built-in atomic operations --
++    ------------------------------------
++ 
++    function Fetch_And_Add
++       (Target    : System.Address;
++        Old_Value : Integer)
++        return Integer;
++    pragma Import (Intrinsic,
++                   Fetch_And_Add,
++                   "__sync_fetch_and_add_4");
++ 
++    function Lock_Test_And_Set
++       (Target    : System.Address;
++        Old_Value : Integer)
++        return Integer;
++    pragma Import (Intrinsic,
++                   Lock_Test_And_Set,
++                   "__sync_lock_test_and_set_4");
++ 
++    procedure Lock_Release (Target : System.Address);
++    pragma Import (Intrinsic,
++                   Lock_Release,
++                   "__sync_lock_release_4");
++ 
++ private
++ 
++    pragma Inline (Retrieve_XAbort_Code);
++    pragma Inline_Always (XBegin);
++    pragma Inline_Always (XEnd);
++    pragma Inline_Always (XTest);
++    pragma Inline_Always (XAbort);
++    pragma Inline_Always (Pause);
++    pragma Inline_Always (Fence);
++    pragma Inline_Always (Lock_Test_And_Set);
++    pragma Inline_Always (Lock_Release);
++ end TSX_Inst;

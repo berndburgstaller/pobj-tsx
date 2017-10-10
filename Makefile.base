@@ -1,0 +1,24 @@
+GCC_ADA_PATH=/opt/gcc-ada/6.3.0_gnattm
+LIBPAPI_PATH=/opt/papi/5.5.1/lib/libpapi.a
+PAPI_INCLUDE=/opt/papi/5.5.1/include
+
+PAPI_BINDER_PATH=../lib/PAPI_Binder
+AFFINITY_PATH=../lib/CPU_Affinity
+ARGS_PATH=../lib/CMD_Args
+
+.PHONY : all
+
+all : ${TARGET}.adb binder.o
+	${GCC_ADA_PATH}/bin/gnatmake -a -c -O3 ${TARGET}.adb -I${PAPI_BINDER_PATH} -I${AFFINITY_PATH} -I${ARGS_PATH} ${COMPILE_OPTION}
+	${GCC_ADA_PATH}/bin/gnatbind ${TARGET} ${BIND_OPTION}
+	${GCC_ADA_PATH}/bin/gnatlink ${TARGET} binder.o ${LIBPAPI_PATH} ${LINK_OPTION}
+
+orig : GCC_ADA_PATH=/opt/gcc-ada/6.3.0
+orig : all
+
+binder.o: ${PAPI_BINDER_PATH}/binder.c
+	${GCC_ADA_PATH}/bin/gcc -c ${PAPI_BINDER_PATH}/binder.c -I${PAPI_INCLUDE} -o binder.o
+
+clean: 
+	rm -f binder.o
+	${GCC_ADA_PATH}/bin/gnatclean ${TARGET}
